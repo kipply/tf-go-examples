@@ -15,34 +15,36 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// https://github.com/tensorflow/tensorflow/blob/051a96f3ec4fc38b248e8ae8ad2f8ad124eda59b/tensorflow/core/lib/hash/crc32c.h
 const maskDelta uint32 = 0xa282ead8
 
+// https://github.com/tensorflow/tensorflow/blob/051a96f3ec4fc38b248e8ae8ad2f8ad124eda59b/tensorflow/core/lib/hash/crc32c.h#L53-L56
 func mask(crc uint32) uint32 {
 	return ((crc >> 15) | (crc << 17)) + maskDelta
 }
 
-// uint64ToBytes returns x as bytes.
+var crc32Table = crc32.MakeTable(crc32.Castagnoli)
+
+func crc32Hash(data []byte) uint32 {
+	return crc32.Checksum(data, crc32Table)
+}
+
 func uint64ToBytes(x uint64) []byte {
 	b := make([]byte, 8)
 	binary.LittleEndian.PutUint64(b, x)
 	return b
 }
 
-var crc32Table = crc32.MakeTable(crc32.Castagnoli)
-
-// crc32Hash returs the crc32 has expected by the C++ TensorFlow
-// libraries.
-func crc32Hash(data []byte) uint32 {
-	return crc32.Checksum(data, crc32Table)
-}
-
-// Write writes the provided data as a record to w.
 func Write(w io.Writer, data []byte) (int, error) {
-	var (
-		length    = uint64(len(data))
-		lengthCRC = mask(crc32Hash(uint64ToBytes(length)))
-		dataCRC   = mask(crc32Hash(data))
-	)
+	// Write based on format specified in https://github.com/tensorflow/tensorflow/blob/051a96f3ec4fc38b248e8ae8ad2f8ad124eda59b/tensorflow/core/lib/io/record_writer.cc#L124-L128
+	//  uint64    length
+	//  uint32    masked crc of length
+	//  byte      data[length]
+	//  uint32    masked crc of data
+
+	length := uint64(len(data))
+	lengthCRC := mask(crc32Hash(uint64ToBytes(uint64(len(data)))))
+	dataCRC := mask(crc32Hash(data))
 
 	if err := binary.Write(w, binary.LittleEndian, length); err != nil {
 		return 0, err
@@ -60,7 +62,8 @@ func Write(w io.Writer, data []byte) (int, error) {
 		return 0, err
 	}
 
-	return binary.Size(dataCRC) + binary.Size(data) + binary.Size(length) + binary.Size(lengthCRC), nil
+	// return size written
+	return binary.Size(dataCRC) + len(data) + binary.Size(length) + binary.Size(lengthCRC), nil
 }
 
 func Read(r io.Reader) (data []byte, err error) {
@@ -70,30 +73,33 @@ func Read(r io.Reader) (data []byte, err error) {
 		dataChecksum   uint32
 	)
 
+	// get data length
 	if err := binary.Read(r, binary.LittleEndian, &length); err != nil {
 		return nil, err
 	}
 
+	// get checksum length
 	if err := binary.Read(r, binary.LittleEndian, &lengthChecksum); err != nil {
 		return nil, err
 	}
 
-	if actual := mask(crc32Hash(uint64ToBytes(length))); actual != lengthChecksum {
-		return nil, errors.New("data length checksum doesn't match")
-	}
-
+	// get data
 	data = make([]byte, length)
-
 	if _, err := r.Read(data); err != nil {
 		return nil, err
 	}
 
+	// check checksum length
+	if actual := mask(crc32Hash(uint64ToBytes(length))); actual != lengthChecksum {
+		return nil, errors.New("corrupted record, length checksum doesn't match")
+	}
+
+	// check data checksum
 	if err := binary.Read(r, binary.LittleEndian, &dataChecksum); err != nil {
 		return nil, err
 	}
-
 	if actual := mask(crc32Hash(data)); actual != dataChecksum {
-		return nil, errors.New("data checksum doesn't match")
+		return nil, errors.New("corrupted record, data checksum doesn't match")
 	}
 
 	return data, nil
