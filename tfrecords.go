@@ -78,7 +78,7 @@ func Read(r io.Reader) (data []byte, err error) {
 		return nil, err
 	}
 
-	// get checksum length
+	// get length checksum
 	if err := binary.Read(r, binary.LittleEndian, &lengthChecksum); err != nil {
 		return nil, err
 	}
@@ -89,15 +89,17 @@ func Read(r io.Reader) (data []byte, err error) {
 		return nil, err
 	}
 
+	// get data checksum
+	if err := binary.Read(r, binary.LittleEndian, &dataChecksum); err != nil {
+		return nil, err
+	}
+
 	// check checksum length
 	if actual := mask(crc32Hash(uint64ToBytes(length))); actual != lengthChecksum {
 		return nil, errors.New("corrupted record, length checksum doesn't match")
 	}
 
 	// check data checksum
-	if err := binary.Read(r, binary.LittleEndian, &dataChecksum); err != nil {
-		return nil, err
-	}
 	if actual := mask(crc32Hash(data)); actual != dataChecksum {
 		return nil, errors.New("corrupted record, data checksum doesn't match")
 	}
